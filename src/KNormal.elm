@@ -15,10 +15,14 @@ type Term
   | If Id Term Term
   | Let Id Ty Term Term
   | Var Id
+  | Letrec Def Term
   | App Id (List Id)
   | KnlApp Id (List Id) -- negate, cons, ...
   | ExtApp Id (List Id) -- sin, cache, ...
   | Error String
+
+type Def =
+  Def Id Ty (List ( Id, Ty )) Term
 
 type alias Id = String
 
@@ -74,6 +78,20 @@ g env eff exp =
         _ ->
           ( Error ("var \""++name++"\" is missing"), Ty.I32, eff )
 
+    Absyn.Letrec (Absyn.Def id ty args e1) e2 ->
+      let
+        env_ = env |> Dict.insert id (Internal, ty)
+
+        (t2, ty2, eff_) = g env_ eff e2
+
+        env__ =
+          args |> List.foldl
+          (\(id_, ty_) -> Dict.insert id_ (Internal, ty_))
+          env_
+
+        (t1, ty1, eff__) = g env__ eff_ e1
+      in
+        ( Letrec (Def id ty args t1) t2, ty2, eff__ )
 
     Absyn.App (Absyn.Var id) args ->
       case env |> Dict.get id of
@@ -171,6 +189,9 @@ toString term =
         Ty.Arrow a b -> "("++ty2s a++"->"++ty2s b++")"
         Ty.Custom n -> n
 
+    vd2s ( id, ty ) =
+      ty2s ty ++ " " ++ id
+
     help ind tm =
       let
         indent = String.repeat ind "  "
@@ -187,13 +208,19 @@ toString term =
             help (ind+1) t2
 
           Let id ty t1 t2 ->
-            indent ++ "let " ++ ty2s ty ++ ":" ++ id ++ " =\n" ++
+            indent ++ "let " ++ vd2s (id, ty) ++ " =\n" ++
             help (ind+1) t1 ++
             indent ++ "in\n" ++
             help (ind+1) t2
 
           Var id ->
             indent ++ id ++ "\n"
+
+          Letrec (Def id ty args t1) t2 ->
+            indent ++ vd2s (id, ty) ++ "(" ++ (args |> List.map vd2s |> String.join ", ") ++ ") =\n" ++
+            help (ind+1) t1 ++
+            indent ++ "in\n" ++
+            help (ind+1) t2
 
           App fun args ->
             indent ++ fun ++ "(" ++ String.join ", " args ++ ")\n"

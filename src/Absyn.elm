@@ -1,5 +1,6 @@
 module Absyn exposing
   ( Exp(..)
+  , Def(..)
   , parseExp
   , parseType
   )
@@ -9,16 +10,19 @@ import Peg.Parser as Peg exposing (Parser)
 
 
 
-type Decl =
-  VarDecl String Ty Exp
-
 type Exp
   = Bool Bool
   | Int Int
   | If Exp Exp Exp
-  | Let String Ty Exp Exp
-  | Var String
+  | Let Id Ty Exp Exp
+  | Var Id
+  | Letrec Def Exp
   | App Exp (List Exp)
+
+type Def =
+  Def Id Ty (List (Id, Ty)) Exp
+
+type alias Id = String
 
 parseExp : String -> Result String Exp
 parseExp src =
@@ -50,6 +54,7 @@ pThen   = Peg.match "then"
 pElse   = Peg.match "else"
 pLet    = Peg.match "let"
 pIn     = Peg.match "in"
+pLetrec = Peg.match "letrec"
 
 keyword =
   [ "True"
@@ -59,6 +64,7 @@ keyword =
   , "else"
   , "let"
   , "in"
+  , "letrec"
   ]
 
 pDigit =
@@ -155,10 +161,31 @@ pLetExp =
     Peg.intersperseSeq4 pSp pLet pVarDef pIn pExp
     (\_ ( var, ty, def ) _ t -> Let var ty def t)
 
+pLetrecExp =
+  let
+    pArgs =
+      Peg.join pSp pVarDecl
+        |> Peg.option
+        |> Peg.map (\m -> case m of
+          Nothing -> []
+          Just l -> l
+        )
+
+    pFun =
+      Peg.seq3 pVarDecl pSp pArgs
+      (\( id, ty ) _ args -> ( id, ty, args ))
+    pVarDef =
+      Peg.intersperseSeq3 pOpSp pFun pEq pExp
+      (\( id, ty, args ) _ body -> Def id ty args body)
+  in
+    Peg.intersperseSeq4 pSp pLetrec pVarDef pIn pExp
+    (\_ def _ t -> Letrec def t)
+
 pExp =
   Peg.choice
   [ \_ -> pIfExp
   , \_ -> pLetExp
+  , \_ -> pLetrecExp
   , \_ -> pApp
   , \_ -> pTerm
   ]
