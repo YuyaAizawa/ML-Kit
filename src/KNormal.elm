@@ -1,6 +1,5 @@
 module KNormal exposing
   ( Term(..)
-  , Effect
   , Origin(..)
   , g --
   , toString
@@ -26,9 +25,7 @@ type Def =
 
 type alias Id = String
 
-type alias Effect =
-  { fresh : Int
-  }
+type alias Fresh = Int
 
 type alias Env = Dict String (Origin, Ty)
 
@@ -37,132 +34,139 @@ type Origin
   | Kernel
   | External
 
+type alias State = Fresh -> ( Term, Ty, Fresh )
 
 
 {-| Make k-normal term from environment, effects, and expression and return
 with type and fresh id.
 -}
-g : Env -> Effect -> Exp -> ( Term, Ty, Effect )
-g env eff exp =
+g : Env -> Exp -> State
+g env exp =
   case exp of
     Absyn.Bool bool ->
       let
         term = if bool then Int 1 else Int 0
       in
-        ( term, Ty.I32, eff )
+        return term Ty.I32
 
     Absyn.Int int ->
-      ( Int int, Ty.I32, eff )
+      return (Int int) Ty.I32
 
     Absyn.If condExp thenExp elseExp ->
-      insertLet (g env eff condExp) (\eff1 condId ->
-        let
-          ( thenTm, thenTy, eff2 ) = g env eff1 thenExp
-          ( elseTm, elseTy, eff3 ) = g env eff2 elseExp
-        in
-          ( If condId thenTm elseTm, thenTy, eff3 )
-      )
+      h env condExp (\condTm condTy ->
+      insertLet condTm condTy (\condId ->
+      h env thenExp (\thenTm thenTy ->
+      h env elseExp (\elseTm elseTy ->
+      return (If condId thenTm elseTm) thenTy
+      ))))
 
     Absyn.Let name ty e1 e2 ->
       let
-        ( tm1, ty1, eff1 ) = g env eff e1
-        ( tm2, ty2, eff2 ) = g (env |> Dict.insert name (Internal, ty)) eff1 e2
+        env_ = env |> Dict.insert name (Internal, ty)
       in
-        ( Let name ty tm1 tm2, ty2, eff2 )
+        h env e1 (\tm1 ty1 ->
+        h env_ e2 (\tm2 ty2 ->
+        return (Let name ty tm1 tm2) ty2
+        ))
 
     Absyn.Var name ->
       case env |> Dict.get name of
         Just (Internal, ty) ->
-          ( Var name, ty, eff )
+          return (Var name) ty
 
         _ ->
-          ( Error ("var \""++name++"\" is missing"), Ty.I32, eff )
+          return (Error ("var \""++name++"\" is missing")) Ty.I32
 
     Absyn.Letrec (Absyn.Def id ty args e1) e2 ->
       let
-        env_ = env |> Dict.insert id (Internal, ty)
-
-        (t2, ty2, eff_) = g env_ eff e2
+        env_ =
+          env
+            |> Dict.insert id (Internal, ty)
 
         env__ =
-          args |> List.foldl
-          (\(id_, ty_) -> Dict.insert id_ (Internal, ty_))
-          env_
-
-        (t1, ty1, eff__) = g env__ eff_ e1
+          args
+            |> List.foldl (\(id_, ty_) ->
+              Dict.insert id_ (Internal, ty_)) env_
       in
-        ( Letrec (Def id ty args t1) t2, ty2, eff__ )
+        h env_ e2 (\tm2 ty2 ->
+        h env__ e1 (\tm1 ty1 ->
+        return (Letrec (Def id ty args tm1) tm2) ty2
+        ))
 
     Absyn.App (Absyn.Var id) args ->
       case env |> Dict.get id of
         Just (Kernel, ty) ->
-          makeSpecialApp KnlApp env eff id ty args
+          returnApp env KnlApp id args ty
 
         Just (External, ty) ->
-          makeSpecialApp ExtApp env eff id ty args
+          returnApp env ExtApp id args ty
 
         _ ->
-          makeApp env eff (Absyn.Var id) args
+          returnApp_ env (Absyn.Var id) args
 
     Absyn.App fun args ->
-      makeApp env eff fun args
+      returnApp_ env fun args
 
-makeSpecialApp : ( Id -> List Id -> Term ) -> Env -> Effect -> Id -> Ty -> List Exp -> ( Term, Ty, Effect )
-makeSpecialApp mapper env eff id ty args =
+
+returnApp : Env -> ( Id -> List Id -> Term ) -> Id -> List Exp -> Ty -> State
+returnApp env mapper id args ty =
   let
-    bind eff_ ids args_ =
+    bind ids args_ =
       case args_ of
         [] ->
-          ( mapper id (List.reverse ids), ty, eff_ )
+          return (mapper id (List.reverse ids)) ty
 
         hd :: tl ->
-          insertLet (g env eff_ hd) (\eff__ id_ ->
-            bind eff__ (id_ :: ids) tl
-          )
+          h env hd (\tm_ ty_ ->
+          insertLet tm_ ty_ (\id_ ->
+          bind (id_ :: ids) tl
+          ))
   in
-    bind eff [] args
+    bind [] args
 
-makeApp : Env -> Effect -> Exp -> List Exp -> ( Term, Ty, Effect )
-makeApp env eff exp args =
-  case g env eff exp of
-    ( _, Ty.Arrow _ retTy, _ ) as ge1 ->
-      insertLet ge1 (\eff_ fun ->
-        let
-          bind eff__ ids args_ =
-            case args_ of
-              [] ->
-                ( App fun (List.reverse ids), retTy, eff__ )
+returnApp_ : Env -> Exp -> List Exp -> State
+returnApp_ env exp args =
+    h env exp (\tm ty ->
+      case ty of
+        (Ty.Arrow _ retTy) ->
+          insertLet tm ty (\id ->
+            returnApp env App id args retTy
+          )
 
-              hd :: tl ->
-                insertLet (g env eff__ hd) (\eff___ id__ ->
-                  bind eff___ (id__ :: ids) tl
-                )
-        in
-          bind eff_ [] args
-      )
+        _ -> return (Error "invalid apply") Ty.I32
+    )
 
-    _ ->
-      ( Error "invalid apply", Ty.I32, eff )
+h : Env -> Exp -> (Term -> Ty -> State) -> State
+h env exp fun =
+  \eff ->
+    let
+      (tm, ty, eff_) = g env exp eff
+    in
+      fun tm ty eff_
 
+return : Term -> Ty -> State
+return term ty =
+  \fresh -> ( term, ty, fresh )
 
 
 {-| Insert let term into k-normal term.
 
     let xxx = yyy in zzz
 
-The first argument makes 'yyy'. The second argument is the function takes 'xxx'
+The first two argument are 'yyy' and its type. The third argument is the function takes 'xxx'
  and return 'zzz'.
 -}
-insertLet : ( Term, Ty, Effect ) -> (Effect -> Id -> ( Term, Ty, Effect )) -> ( Term, Ty, Effect )
-insertLet ( tm1, ty1, eff ) k =
-  let
-    ( id , eff_ ) = genId eff ty1
-    ( tm2, ty2, eff__ ) = k eff_ id
+insertLet : Term -> Ty -> (Id -> State) -> State
+insertLet term ty fun =
+  \fresh0 ->
+    let
+      ( id , fresh1 ) = genId fresh0 ty
+      ( term_, ty_, fresh2 ) = fun id fresh1
   in
-    ( Let id ty1 tm1 tm2, ty2, eff__ )
+    ( Let id ty term term_, ty_, fresh2 )
 
-genId : Effect -> Ty -> ( Id, Effect )
-genId eff ty =
+genId : Fresh -> Ty -> ( Id, Fresh )
+genId fresh ty =
   let
     prefix =
       case ty of
@@ -172,13 +176,13 @@ genId eff ty =
         Ty.Custom _  -> "c"
 
     name =
-      eff.fresh
+      fresh
         |> String.fromInt
         |> String.padLeft 4 '0'
         |> (\num -> prefix ++ num)
 
   in
-    ( name, { eff | fresh = eff.fresh + 1} )
+    ( name, fresh + 1 )
 
 toString term =
   let

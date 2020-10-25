@@ -78,7 +78,7 @@ outputView model =
     out =
       model.source
         |> Absyn.parseExp
-        |> Result.map (KNormal.g env {fresh = 0})
+        |> Result.map (\exp -> KNormal.g env exp 0)
         |> Result.map (\( tm, _, _ ) -> KNormal.toString tm)
         |> Result.withDefault "parse error"
   in
