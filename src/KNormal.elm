@@ -5,9 +5,11 @@ module KNormal exposing
   , toString
   )
 
-import Dict exposing (Dict)
 import Absyn exposing (Exp)
 import Ty exposing (Ty)
+
+import Dict exposing (Dict)
+import Result exposing (Result)
 
 type Term
   = Int Int
@@ -18,7 +20,6 @@ type Term
   | App Id (List Id)
   | KnlApp Id (List Id) -- negate, cons, ...
   | ExtApp Id (List Id) -- sin, cache, ...
-  | Error String
 
 type Def =
   Def Id Ty (List ( Id, Ty )) Term
@@ -34,7 +35,7 @@ type Origin
   | Kernel
   | External
 
-type alias State = Fresh -> ( Term, Ty, Fresh )
+type alias State = Fresh -> Result String ( Term, Ty, Fresh )
 
 
 {-| Make k-normal term from environment, effects, and expression and return
@@ -75,7 +76,7 @@ g env exp =
           return (Var name) ty
 
         _ ->
-          return (Error ("var \""++name++"\" is missing")) Ty.I32
+          throw ("var \""++name++"\" is missing")
 
     Absyn.Letrec (Absyn.Def id ty args e1) e2 ->
       let
@@ -133,21 +134,24 @@ returnApp_ env exp args =
             returnApp env App id args retTy
           )
 
-        _ -> return (Error "invalid apply") Ty.I32
+        _ -> throw "invalid apply"
     )
 
 h : Env -> Exp -> (Term -> Ty -> State) -> State
 h env exp fun =
   \eff ->
-    let
-      (tm, ty, eff_) = g env exp eff
-    in
-      fun tm ty eff_
+    g env exp eff
+      |> Result.andThen (\(tm, ty, eff_) ->
+        fun tm ty eff_
+      )
 
 return : Term -> Ty -> State
 return term ty =
-  \fresh -> ( term, ty, fresh )
+  \fresh -> Ok ( term, ty, fresh )
 
+throw : String -> State
+throw cause =
+  \fresh -> Err cause
 
 {-| Insert let term into k-normal term.
 
@@ -161,9 +165,11 @@ insertLet term ty fun =
   \fresh0 ->
     let
       ( id , fresh1 ) = genId fresh0 ty
-      ( term_, ty_, fresh2 ) = fun id fresh1
-  in
-    ( Let id ty term term_, ty_, fresh2 )
+    in
+      fun id fresh1
+        |> Result.map (\(term_, ty_, fresh2 ) ->
+          ( Let id ty term term_, ty_, fresh2 )
+        )
 
 genId : Fresh -> Ty -> ( Id, Fresh )
 genId fresh ty =
@@ -234,8 +240,5 @@ toString term =
 
           ExtApp fun args ->
             indent ++ "$" ++ fun ++ "$(" ++ String.join ", " args ++ ")\n"
-
-          Error e ->
-            indent ++ "ERROR: " ++ e ++ "\n"
   in
     help 0 term

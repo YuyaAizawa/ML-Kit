@@ -78,9 +78,12 @@ outputView model =
     out =
       model.source
         |> Absyn.parseExp
-        |> Result.map (\exp -> KNormal.g env exp 0)
+        |> Result.andThen (\exp -> KNormal.g env exp 0)
         |> Result.map (\( tm, _, _ ) -> KNormal.toString tm)
-        |> Result.withDefault "parse error"
+        |> (\r -> case r of
+          Ok str -> str
+          Err str -> str
+        )
   in
     Html.pre []
     [ Html.code []
