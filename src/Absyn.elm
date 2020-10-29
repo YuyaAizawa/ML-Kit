@@ -1,6 +1,7 @@
 module Absyn exposing
   ( Exp(..)
   , Def(..)
+  , toString
   , parseExp
   , parseType
   )
@@ -20,9 +21,78 @@ type Exp
   | App Exp (List Exp)
 
 type Def =
-  Def Id Ty (List (Id, Ty)) Exp
+  Def Id Ty (List ( Id, Ty )) Exp
 
 type alias Id = String
+
+toString : Exp -> String
+toString exp =
+  let
+    vd2s ( id, ty ) =
+      id ++ ":" ++ Ty.toString ty
+
+    parenHelp idt e =
+      let
+        indent =
+          String.repeat idt "  "
+      in
+        case e of
+          Bool True -> "True"
+          Bool False -> "False"
+          Int int -> String.fromInt int
+          If _ _ _ -> "(\n" ++ help (idt+1) e ++ indent ++ ") "
+          Let _ _ _ _ -> "(\n" ++ help (idt+1) e ++ indent ++ ") "
+          Var id -> id
+          Letrec _ _ -> "(\n" ++ help (idt+1) e ++ indent ++ ") "
+          App fun args -> "(" ++ String.join " " (List.map (parenHelp idt) (fun::args)) ++ ")"
+
+    help : Int -> Exp -> String
+    help idt e =
+      let
+        indent =
+          String.repeat idt "  "
+      in
+        case e of
+          Bool True ->
+            indent ++ "True\n"
+
+          Bool False ->
+            indent ++ "False\n"
+
+          Int int ->
+            indent ++ String.fromInt int ++ "\n"
+
+          If condTm thenTm elseTm ->
+            indent ++ "if\n" ++
+              help (idt+1) condTm ++
+            indent ++ "then\n" ++
+              help (idt+1) thenTm ++
+            indent ++ "else\n" ++
+              help (idt+1) elseTm
+
+          Let id ty e1 e2 ->
+            indent ++ "let " ++ vd2s ( id, ty ) ++ " =\n" ++
+              help (idt+1) e1 ++
+            indent ++ "in\n" ++
+              help (idt+1) e2
+
+          Var id ->
+            indent ++ id ++ "\n"
+
+          Letrec (Def id ty args e1) e2 ->
+            indent ++ "letrec " ++ String.join " " (List.map vd2s (( id, ty )::args)) ++ " =\n" ++
+              help (idt+1) e1 ++
+            indent ++ "in\n" ++
+              help (idt+1) e2
+
+          App fun args ->
+            indent ++ String.join " " (List.map (parenHelp idt) (fun::args)) ++ "\n"
+  in
+    help 0 exp
+
+
+
+-- PARSER --
 
 parseExp : String -> Result String Exp
 parseExp src =
@@ -139,6 +209,7 @@ pTerm =
   , \_ -> pFalse
   , \_ -> pInt
   , \_ -> pVar
+  , \_ -> Peg.intersperseSeq3 pOpSp pLParen pExp pRParen (\_ e _ -> e)
   ]
 
 pApp =

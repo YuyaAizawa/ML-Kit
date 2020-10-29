@@ -1,5 +1,6 @@
 module KNormal exposing
   ( Term(..)
+  , Def(..)
   , Origin(..)
   , g --
   , toString
@@ -96,10 +97,10 @@ g env exp =
 
     Absyn.App (Absyn.Var id) args ->
       case env |> Dict.get id of
-        Just (Kernel, ty) ->
+        Just (Kernel, Ty.Ext _ ty) ->
           returnApp env KnlApp id args ty
 
-        Just (External, ty) ->
+        Just (External, Ty.Ext _ ty) ->
           returnApp env ExtApp id args ty
 
         _ ->
@@ -179,6 +180,7 @@ genId fresh ty =
         Ty.Bool      -> "b"
         Ty.I32       -> "i"
         Ty.Arrow _ _ -> "f"
+        Ty.Ext _ _   -> "e"
         Ty.Custom _  -> "c"
 
     name =
@@ -192,15 +194,8 @@ genId fresh ty =
 
 toString term =
   let
-    ty2s ty =
-      case ty of
-        Ty.Bool -> "Bool"
-        Ty.I32 -> "I32"
-        Ty.Arrow a b -> "("++ty2s a++"->"++ty2s b++")"
-        Ty.Custom n -> n
-
     vd2s ( id, ty ) =
-      ty2s ty ++ " " ++ id
+      Ty.toString ty ++ " " ++ id
 
     help ind tm =
       let
@@ -227,7 +222,7 @@ toString term =
             indent ++ id ++ "\n"
 
           Letrec (Def id ty args t1) t2 ->
-            indent ++ vd2s (id, ty) ++ "(" ++ (args |> List.map vd2s |> String.join ", ") ++ ") =\n" ++
+            indent ++ "letrec " ++ vd2s (id, ty) ++ "(" ++ (args |> List.map vd2s |> String.join ", ") ++ ") =\n" ++
             help (ind+1) t1 ++
             indent ++ "in\n" ++
             help (ind+1) t2
