@@ -1,33 +1,31 @@
-module KNormal exposing
-  ( Term(..)
-  , Def(..)
+module ANormal exposing
+  ( Exp(..)
+  , CExp(..)
   , Origin(..)
   , g --
   , toString
   )
 
-import Absyn exposing (Exp)
+import Absyn
 import Ty exposing (Ty)
 
 import Dict exposing (Dict)
 import Result exposing (Result)
 
-type Term
+type Exp
+  = CompExp CExp
+  | Let Id Ty CExp Exp
+  | Letrec Id Ty (List ( Id, Ty )) Exp Exp
+
+type CExp
   = Int Int
-  | If Id Term Term
-  | Let Id Ty Term Term
+  | If Id Exp Exp
   | Var Id
-  | Letrec Def Term
   | App Id (List Id)
   | KnlApp Id (List Id) -- negate, cons, ...
   | ExtApp Id (List Id) -- sin, cache, ...
 
-type Def =
-  Def Id Ty (List ( Id, Ty )) Term
-
 type alias Id = String
-
-type alias Fresh = Int
 
 type alias Env = Dict String (Origin, Ty)
 
@@ -36,30 +34,30 @@ type Origin
   | Kernel
   | External
 
-type alias State = Fresh -> Result String ( Term, Ty, Fresh )
-
+type alias State = Fresh -> Result String ( Exp, Ty, Fresh )
+type alias Fresh = Int
 
 {-| Make k-normal term from environment, effects, and expression and return
 with type and fresh id.
 -}
-g : Env -> Exp -> State
+g : Env -> Absyn.Exp -> State
 g env exp =
   case exp of
     Absyn.Bool bool ->
       let
-        term = if bool then Int 1 else Int 0
+        value = if bool then Int 1 else Int 0
       in
-        return term Ty.I32
+        return (CompExp value) Ty.I32
 
     Absyn.Int int ->
-      return (Int int) Ty.I32
+      return (CompExp (Int int)) Ty.I32
 
     Absyn.If condExp thenExp elseExp ->
       h env condExp (\condTm condTy ->
       insertLet condTm condTy (\condId ->
       h env thenExp (\thenTm thenTy ->
       h env elseExp (\elseTm elseTy ->
-      return (If condId thenTm elseTm) thenTy
+      return (CompExp (If condId thenTm elseTm)) thenTy
       ))))
 
     Absyn.Let name ty e1 e2 ->
@@ -67,14 +65,15 @@ g env exp =
         env_ = env |> Dict.insert name (Internal, ty)
       in
         h env e1 (\tm1 ty1 ->
+        insertLet tm1 ty1 (\id ->
         h env_ e2 (\tm2 ty2 ->
-        return (Let name ty tm1 tm2) ty2
-        ))
+        return (Let name ty (Var id) tm2) ty2
+        )))
 
     Absyn.Var name ->
       case env |> Dict.get name of
         Just (Internal, ty) ->
-          return (Var name) ty
+          return (CompExp (Var name)) ty
 
         _ ->
           throw ("var \""++name++"\" is missing")
@@ -92,7 +91,7 @@ g env exp =
       in
         h env_ e2 (\tm2 ty2 ->
         h env__ e1 (\tm1 ty1 ->
-        return (Letrec (Def id ty args tm1) tm2) ty2
+        return (Letrec id ty args tm1 tm2) ty2
         ))
 
     Absyn.App (Absyn.Var id) args ->
@@ -103,20 +102,25 @@ g env exp =
         Just (External, Ty.Ext _ ty) ->
           returnApp env ExtApp id args ty
 
-        _ ->
+        Just (Internal, _ ) ->
           returnApp_ env (Absyn.Var id) args
+
+        _ ->
+          throw ("function "++id++" is missing")
 
     Absyn.App fun args ->
       returnApp_ env fun args
 
 
-returnApp : Env -> ( Id -> List Id -> Term ) -> Id -> List Exp -> Ty -> State
+returnApp : Env -> ( Id -> List Id -> CExp ) -> Id -> List Absyn.Exp -> Ty -> State
 returnApp env mapper id args ty =
   let
     bind ids args_ =
       case args_ of
         [] ->
-          return (mapper id (List.reverse ids)) ty
+          insertLet (mapper id (List.reverse ids) |> CompExp) ty (\id_ ->
+          return (CompExp (Var id_)) ty
+          )
 
         hd :: tl ->
           h env hd (\tm_ ty_ ->
@@ -126,7 +130,7 @@ returnApp env mapper id args ty =
   in
     bind [] args
 
-returnApp_ : Env -> Exp -> List Exp -> State
+returnApp_ : Env -> Absyn.Exp -> List Absyn.Exp -> State
 returnApp_ env exp args =
     h env exp (\tm ty ->
       case ty of
@@ -138,7 +142,7 @@ returnApp_ env exp args =
         _ -> throw "invalid apply"
     )
 
-h : Env -> Exp -> (Term -> Ty -> State) -> State
+h : Env -> Absyn.Exp -> (Exp -> Ty -> State) -> State
 h env exp fun =
   \eff ->
     g env exp eff
@@ -146,31 +150,41 @@ h env exp fun =
         fun tm ty eff_
       )
 
-return : Term -> Ty -> State
-return term ty =
-  \fresh -> Ok ( term, ty, fresh )
+return : Exp -> Ty -> State
+return exp ty =
+  \fresh -> Ok ( exp, ty, fresh )
 
 throw : String -> State
 throw cause =
   \fresh -> Err cause
 
-{-| Insert let term into k-normal term.
+{-| Insert let term into a-normal term.
 
     let xxx = yyy in zzz
 
 The first two argument are 'yyy' and its type. The third argument is the function takes 'xxx'
  and return 'zzz'.
 -}
-insertLet : Term -> Ty -> (Id -> State) -> State
-insertLet term ty fun =
+
+insertLet : Exp -> Ty -> (Id -> State) -> State
+insertLet tm ty fun =
   \fresh0 ->
-    let
-      ( id , fresh1 ) = genId fresh0 ty
-    in
-      fun id fresh1
-        |> Result.map (\(term_, ty_, fresh2 ) ->
-          ( Let id ty term term_, ty_, fresh2 )
-        )
+    case tm of
+      CompExp cexp ->
+        let
+          ( id , fresh1 ) = genId fresh0 ty
+        in
+          fun id fresh1
+            |> Result.map (\(exp, ty_, fresh2 ) ->
+              ( Let id ty cexp exp, ty_, fresh2 ))
+
+      Let id ty_ cexp exp ->
+        insertLet exp ty fun fresh0
+          |> Result.map (\( exp_, _, fresh1 ) -> ( Let id ty_ cexp exp_, ty, fresh1 ))
+
+      Letrec id ty_ args e1 e2 ->
+        insertLet e2 ty fun fresh0
+          |> Result.map (\( exp_, _, fresh1 ) -> ( Letrec id ty_ args e1 exp_, ty, fresh1))
 
 genId : Fresh -> Ty -> ( Id, Fresh )
 genId fresh ty =
@@ -188,20 +202,40 @@ genId fresh ty =
         |> String.fromInt
         |> String.padLeft 4 '0'
         |> (\num -> prefix ++ num)
-
   in
     ( name, fresh + 1 )
 
+toString : Exp -> String
 toString term =
   let
     vd2s ( id, ty ) =
       Ty.toString ty ++ " " ++ id
 
-    help ind tm =
+    help ind exp =
       let
         indent = String.repeat ind "  "
       in
-        case tm of
+        case exp of
+          CompExp cexp ->
+            helpc ind cexp
+
+          Let id ty t1 t2 ->
+            indent ++ "let " ++ vd2s (id, ty) ++ " =\n" ++
+            helpc (ind+1) t1 ++
+            indent ++ "in\n" ++
+            help (ind+1) t2
+
+          Letrec id ty args t1 t2 ->
+            indent ++ "letrec " ++ vd2s (id, ty) ++ "(" ++ (args |> List.map vd2s |> String.join ", ") ++ ") =\n" ++
+            help (ind+1) t1 ++
+            indent ++ "in\n" ++
+            help (ind+1) t2
+
+    helpc ind cexp =
+      let
+        indent = String.repeat ind "  "
+      in
+        case cexp of
           Int int ->
             indent ++ (int |> String.fromInt) ++ "\n"
 
@@ -212,20 +246,8 @@ toString term =
             indent ++ "else\n" ++
             help (ind+1) t2
 
-          Let id ty t1 t2 ->
-            indent ++ "let " ++ vd2s (id, ty) ++ " =\n" ++
-            help (ind+1) t1 ++
-            indent ++ "in\n" ++
-            help (ind+1) t2
-
           Var id ->
             indent ++ id ++ "\n"
-
-          Letrec (Def id ty args t1) t2 ->
-            indent ++ "letrec " ++ vd2s (id, ty) ++ "(" ++ (args |> List.map vd2s |> String.join ", ") ++ ") =\n" ++
-            help (ind+1) t1 ++
-            indent ++ "in\n" ++
-            help (ind+1) t2
 
           App fun args ->
             indent ++ fun ++ "(" ++ String.join ", " args ++ ")\n"

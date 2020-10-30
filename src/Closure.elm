@@ -17,27 +17,18 @@ type Term
   | If Id Term Term
   | Let Id Ty Term Term
   | Var Id
+  | Letrec Id Ty (List (Id, Ty)) Term Term
   | MakeCls Id Ty Cls Term
   | AppCls Id (List Id)
   | AppDir Label (List Id)
 
 type Cls = Cls Label (List Id) -- entry, runtime free variable
 
-type alias FunDef =
-  { name : Label
-  , ty : Ty
-  , args : List ( Id, Ty )
-  , fv : List ( Id, Ty )
-  , body : Term
-  }
-
 type alias Id = String
 type alias Label = String
 
 
-type alias State = List FunDef -> ( Term, List FunDef )
-
-g : Dict Id Ty -> Set Id -> K.Term -> State
+g : Dict Id Ty -> Set Id -> K.Term -> State  -- type environment, known as function (not closure), k-normal expression
 g env known term =
   case term of
     K.Int int ->
