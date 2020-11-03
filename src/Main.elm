@@ -8,6 +8,7 @@ import Html.Events exposing (onInput)
 import Ty exposing (Ty)
 import Absyn
 import ANormal
+import Closure
 
 import Dict
 import Set
@@ -72,11 +73,15 @@ view model =
         |> Result.andThen (\exp -> ANormal.g env exp 0)
         |> Result.map (\( tm, ty, _ ) -> ( tm, ty ))
 
+    closure =
+      anormal
+        |> Result.map (\( tm, _ ) -> Closure.g Dict.empty Set.empty tm)
   in
     Html.div []
     [ inputView
     , absynView absyn
     , aNormalView anormal
+    , closureView closure
     ]
 
 inputView : Html Msg
@@ -121,6 +126,27 @@ aNormalView r =
     Html.div []
     [ Html.h2 []
       [ Html.text "A-Normal"
+      ]
+    , Html.pre []
+      [ Html.code []
+        [ Html.text str
+        ]
+      ]
+    ]
+
+closureView : Result String ( Closure.Exp ) -> Html Msg
+closureView r =
+  let
+    str = case r of
+      Ok term ->
+        Closure.toString term
+
+      Err cause ->
+        cause
+  in
+    Html.div []
+    [ Html.h2 []
+      [ Html.text "Closure"
       ]
     , Html.pre []
       [ Html.code []

@@ -1,201 +1,214 @@
 module Closure exposing
-  ( Term(..)
-  , FunDef
+  ( Exp(..)
+  , CExp(..)
   , g
-  , funDefToString
-  , termToString
+  , toString
   )
 
 import Ty exposing (Ty)
-import KNormal as K
+import ANormal as A
 
 import Dict exposing (Dict)
 import Set exposing (Set)
 
-type Term
+type Exp
+  = CompExp CExp
+  | Let Id Ty CExp Exp
+  | Letrec Id Ty (List ( Id, Ty )) Exp Exp
+
+type CExp
   = Int Int
-  | If Id Term Term
-  | Let Id Ty Term Term
+  | If Id Exp Exp
   | Var Id
-  | Letrec Id Ty (List (Id, Ty)) Term Term
-  | MakeCls Id Ty Cls Term
+  | MakeCls Label (List Id)
+  | ProjCls Id Id
   | AppCls Id (List Id)
   | AppDir Label (List Id)
-
-type Cls = Cls Label (List Id) -- entry, runtime free variable
 
 type alias Id = String
 type alias Label = String
 
+clsTyFromId id = Ty.Custom ("_Cls_"++id)
 
-g : Dict Id Ty -> Set Id -> K.Term -> State  -- type environment, known as function (not closure), k-normal expression
-g env known term =
-  case term of
-    K.Int int ->
-      return (Int int)
+g : Dict Id Ty -> Set Id -> A.Exp -> Exp  -- type environment, known as function (not closure), a-normal expression
+g env known exp =
+  case exp of
+    A.CompExp cexp ->
+      CompExp (h env known cexp)
 
-    K.If id e1 e2 ->
-      h env known e1 (\t1 ->
-      h env known e2 (\t2 ->
-      return (If id t1 t2)
-      ))
+    A.Let id ty cexp exp_ ->
+      let
+        known_ = case cexp of
+          A.Var id_ ->
+            if known |> Set.member id_
+            then known |> Set.insert id
+            else known
+          _ ->
+            known
 
-    K.Let id ty e1 e2 ->
-      h env known e1 (\t1 ->
-      h (env |> Dict.insert id ty) known e2 (\t2 ->
-      return (Let id ty t1 t2)
-      ))
+        env_ = env |> Dict.insert id ty
+      in
+        Let id ty (h env known cexp) (g env_ known_ exp_)
 
-    K.Var id ->
-      return (Var id)
+    A.Letrec id ty args e1 e2 ->
+      let
+        env_ = env |> Dict.insert id ty
+        env__ = args |> List.foldl (\( id_, ty_ ) -> Dict.insert id_ ty_ ) env_
+        known_ = known |> Set.insert id
 
-    K.Letrec (K.Def id ty args e1) e2 ->
-      \tl ->
-        let
-          env_ = env |> Dict.insert id ty
+        t1 = g env__ known_ e1
+        ids = List.map Tuple.first args
+        zs = Set.diff (fv t1) (Set.fromList ids)
+      in
+        if zs |> Set.isEmpty
+        then -- just function
+          Letrec id ty args t1 (g env_ known_ e2)
+        else -- need closure
+          let
+            t1_ = g env__ known e1
+            zs_ =
+              Set.fromList (id :: ids)
+                |> Set.diff (fv t1_)
+                |> Set.toList
+            t1__ = openCls env__ clsName zs_ t1_
+            clsName = "_cls_"++id
+            clsTy = clsTyFromId id
+            t2 = g env_ known e2
+          in
+            Letrec
+            clsName
+            ty
+            (( id, clsTy ) :: args)
+            t1__
+            (Let id clsTy (MakeCls clsName zs_) t2)
 
-          known_ = known |> Set.insert id |> Debug.log (id++".known")
-          ( t1, tl_ ) = g (args |> List.foldl (\( i_, t_ ) -> Dict.insert i_ t_) env_) known_ e1 tl
+openCls : Dict Id Ty -> Id -> List Id -> Exp -> Exp
+openCls env clsName args exp =
+  case args of
+    [] ->
+      exp
 
-          ids = List.map Tuple.first args
-          zs =
-            Set.diff (fv t1) (Set.fromList ids)
-              |> Debug.log (id++".zs")
+    hd :: tl ->
+      Let
+      hd
+      (env |> Dict.get hd |> Maybe.withDefault (Ty.Custom "ClsErr"))
+      (ProjCls clsName hd)
+      (openCls env clsName tl exp)
 
-          ( known__, t1_, tl__ ) =
-            if zs |> Set.isEmpty
-            then ( known_, t1, tl_ )
-            else
-              let
-                env__ =
-                  List.foldl
-                  (\( id_, ty_ ) -> Dict.insert id_ ty_)
-                  env_
-                  args
-                ( t1__, tl___ ) = g env__ known e1 tl
-              in
-                ( known, t1__, tl___ )
+h : Dict Id Ty -> Set Id -> A.CExp -> CExp
+h env known cexp =
+  case cexp of
+    A.Int int ->
+      Int int
 
-          zs_ =
-            Set.fromList (id :: ids)
-              |> Set.diff (fv t1_)
-              |> Set.toList
+    A.If id e1 e2 ->
+      If id (g env known e1) (g env known e2)
 
-          zts =
-            zs_
-              |> List.map (\i_ -> env_ |> Dict.get i_ |> Maybe.withDefault (Ty.Custom "ERR") |> (\ty_ -> (i_, ty_)))
+    A.Var id ->
+      Var id
 
-          def =
-            { name = id
-            , ty = ty
-            , args = args
-            , fv = zts
-            , body = t1_
-            }
-
-          ( t2, tl____ ) = g env_ known__ e2 (def :: tl__)
-        in
-          if fv t2 |> Set.member id
-          then ( MakeCls id ty (Cls id zs_) t2, tl____ )
-          else ( t2, tl____ )
-
-    K.App fun args ->
+    A.App fun args ->
       if known |> Set.member fun
       then
-        return (AppDir fun args)
+        AppDir fun args
       else
-        return (AppCls fun args)
+        AppCls fun args
 
-    K.KnlApp fun args ->
-      return (AppDir ("__" ++ fun) args)
+    A.KnlApp fun args ->
+      AppDir ("__" ++ fun) args
 
-    K.ExtApp fun args ->
-      return (AppDir ("_" ++ fun) args)
+    A.ExtApp fun args ->
+      AppDir ("_" ++ fun) args
 
-
-h : Dict Id Ty -> Set Id -> K.Term -> (Term -> State) -> State
-h env known exp fun toplevel =
+fv : Exp -> Set Id
+fv exp =
   let
-    ( term, toplevel_ ) = g env known exp toplevel
+    s = Set.singleton
+    u = Set.union
+    d = Set.diff
+    r = Set.remove
+    l = Set.fromList
   in
-    fun term toplevel_
+    case exp of
+      CompExp cexp -> fvc cexp
+      Let id _ t1 t2 -> fvc t1 |> u (fv t2 |> r id)
+      Letrec id _ args e1 e2 ->
+        d (u (fv e1) (fv e2)) <| l (args |> List.map Tuple.first |> (::) id)
 
-addTopLevel : Dict Id Ty -> Set Id -> K.Term -> (Term -> ( FunDef, State )) -> State
-addTopLevel env known exp fun toplevel =
-  let
-    ( term, toplevel_ ) = g env known exp toplevel
-    ( def, next ) = fun term
-  in
-    next <| def :: toplevel_
-
-return : Term -> State
-return t =
-  \tl -> ( t, tl )
-
-
-fv : Term -> Set Id
-fv term =
+fvc : CExp -> Set Id
+fvc cexp =
   let
     s = Set.singleton
     u = Set.union
     r = Set.remove
     l = Set.fromList
   in
-    case term of
-      Int _          -> Set.empty
-      If id t1 t2    -> s id |> u (fv t1) |> u (fv t2)
-      Let id _ t1 t2 -> fv t1 |> u (fv t2 |> r id)
-      Var id         -> s id
-      MakeCls id _ (Cls _ fvs) t
-                     -> l fvs |> u (fv t) |> r id
-      AppCls id fvs  -> l (id :: fvs)
-      AppDir _ fvs   -> l fvs
+    case cexp of
+      Int _         -> Set.empty
+      If id t1 t2   -> s id |> u (fv t1) |> u (fv t2)
+      Var id        -> s id
+      MakeCls _ fvs -> l fvs
+      ProjCls id _   -> s id
+      AppCls id fvs -> l (id :: fvs)
+      AppDir _ fvs  -> l fvs
 
-funDefToString : FunDef -> String
-funDefToString def =
-  Ty.toString def.ty ++ " " ++ def.name ++
-    "(" ++ (def.args |> List.map vd2s |> String.join ", ") ++ ")" ++
-    "[" ++ (def.fv |> List.map vd2s |> String.join ", ") ++ "] =\n" ++
-      tm2s 1 def.body
-
-termToString : Term -> String
-termToString term =
-  tm2s 0 term
-
-tm2s : Int -> Term -> String
-tm2s idt t =
+toString : Exp -> String
+toString term =
   let
-    indent = String.repeat idt "  "
+    vd2s ( id, ty ) =
+      Ty.toString ty ++ " " ++ id
+
+    help : Int -> Exp -> String
+    help ind exp =
+      let
+        indent = String.repeat ind "  "
+      in
+        case exp of
+          CompExp cexp ->
+            indent ++ helpc ind cexp ++ "\n"
+
+          Let id ty t1 t2 ->
+            indent ++ "let " ++ vd2s (id, ty) ++ " = " ++
+            helpc (ind+1) t1 ++
+            " in\n" ++
+            help (ind) t2
+
+          Letrec id ty args t1 t2 ->
+            indent ++ "letrec " ++ vd2s (id, ty) ++ "(" ++ (args |> List.map vd2s |> String.join ", ") ++ ") =\n" ++
+            help (ind+1) t1 ++
+            indent ++ " in\n" ++
+            help (ind+1) t2
+
+    helpc : Int -> CExp -> String
+    helpc ind cexp =
+      let
+        indent = String.repeat ind "  "
+      in
+        case cexp of
+          Int int ->
+            int |> String.fromInt
+
+          If id t1 t2 ->
+            "\n" ++
+            indent ++ "if " ++ id ++ "\n" ++
+            indent ++ "then\n" ++
+            help (ind+1) t1 ++
+            indent ++ "else\n" ++
+            help (ind+1) t2
+
+          Var id ->
+            id
+
+          MakeCls label args ->
+            "MakeCls " ++ label ++ "[" ++ String.join ", " args ++ "]"
+
+          ProjCls clsName id ->
+            clsName ++ "." ++ id
+
+          AppCls id args ->
+            "AppCls " ++ id ++ "(" ++ String.join ", " args ++ ")"
+
+          AppDir fun args ->
+            "AppDir " ++ fun ++ "(" ++ String.join ", " args ++ ")"
   in
-    case t of
-      Int int ->
-        indent ++ String.fromInt int ++ "\n"
-
-      If id thenTm elseTm ->
-        indent ++ "if " ++ id ++ "\n" ++
-        indent ++ "then" ++ "\n" ++
-          tm2s (idt+1) thenTm ++
-        indent ++ "else " ++ "\n" ++
-          tm2s (idt+1) elseTm
-
-      Let id ty e1 e2 ->
-        indent ++ "let " ++ vd2s ( id, ty )++ " =\n" ++
-          tm2s (idt+1) e1 ++
-        indent ++"in\n" ++
-          tm2s (idt+1) e2
-
-      Var id ->
-        indent ++ id ++ "\n"
-
-      MakeCls id ty (Cls label args) e ->
-        indent ++ "MakeCls " ++ Ty.toString ty ++ " " ++ id ++ " = " ++ "(#" ++ id ++ "|" ++ String.join ", " args ++ ") in\n" ++
-          tm2s (idt+1) e
-
-      AppCls id args ->
-        indent ++ "AppCls " ++ id ++ "(" ++ String.join ", " args ++ ")\n"
-
-      AppDir label args ->
-        indent ++ "AppDir " ++ label ++ "(" ++ String.join ", " args ++ ")\n"
-
-vd2s ( id, ty ) =
-  Ty.toString ty ++ " " ++ id
+    help 0 term

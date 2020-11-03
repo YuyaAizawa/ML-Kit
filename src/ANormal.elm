@@ -37,8 +37,9 @@ type Origin
 type alias State = Fresh -> Result String ( Exp, Ty, Fresh )
 type alias Fresh = Int
 
-{-| Make k-normal term from environment, effects, and expression and return
-with type and fresh id.
+{-| Make k-normal term from environment and AST expression and return
+as state-function. state-function takes fresh-ID to return pair of
+k-normal term and fresh-ID.
 -}
 g : Env -> Absyn.Exp -> State
 g env exp =
@@ -54,7 +55,7 @@ g env exp =
 
     Absyn.If condExp thenExp elseExp ->
       h env condExp (\condTm condTy ->
-      insertLet condTm condTy (\condId ->
+      insertLetIfNotVar condTm condTy (\condId ->
       h env thenExp (\thenTm thenTy ->
       h env elseExp (\elseTm elseTy ->
       return (CompExp (If condId thenTm elseTm)) thenTy
@@ -65,10 +66,18 @@ g env exp =
         env_ = env |> Dict.insert name (Internal, ty)
       in
         h env e1 (\tm1 ty1 ->
-        insertLet tm1 ty1 (\id ->
-        h env_ e2 (\tm2 ty2 ->
-        return (Let name ty (Var id) tm2) ty2
-        )))
+        case tm1 of
+          CompExp cexp ->
+            h env_ e2 (\tm2 ty2 ->
+            return (Let name ty cexp tm2) ty2
+            )
+
+          _ ->
+            insertLetIfNotVar tm1 ty1 (\id ->
+            h env_ e2 (\tm2 ty2 ->
+            return (Let name ty (Var id) tm2) ty2
+            ))
+        )
 
     Absyn.Var name ->
       case env |> Dict.get name of
@@ -118,13 +127,13 @@ returnApp env mapper id args ty =
     bind ids args_ =
       case args_ of
         [] ->
-          insertLet (mapper id (List.reverse ids) |> CompExp) ty (\id_ ->
+          insertLetIfNotVar (mapper id (List.reverse ids) |> CompExp) ty (\id_ ->
           return (CompExp (Var id_)) ty
           )
 
         hd :: tl ->
           h env hd (\tm_ ty_ ->
-          insertLet tm_ ty_ (\id_ ->
+          insertLetIfNotVar tm_ ty_ (\id_ ->
           bind (id_ :: ids) tl
           ))
   in
@@ -135,11 +144,12 @@ returnApp_ env exp args =
     h env exp (\tm ty ->
       case ty of
         (Ty.Arrow _ retTy) ->
-          insertLet tm ty (\id ->
-            returnApp env App id args retTy
+          insertLetIfNotVar tm ty (\id ->
+          returnApp env App id args retTy
           )
 
-        _ -> throw "invalid apply"
+        _ ->
+          throw "invalid apply"
     )
 
 h : Env -> Absyn.Exp -> (Exp -> Ty -> State) -> State
@@ -165,6 +175,30 @@ throw cause =
 The first two argument are 'yyy' and its type. The third argument is the function takes 'xxx'
  and return 'zzz'.
 -}
+
+insertLetIfNotVar : Exp -> Ty -> (Id -> State) -> State
+insertLetIfNotVar exp ty fun =
+  \fresh0 ->
+    case exp of
+      CompExp (Var id) ->
+        fun id fresh0
+
+      CompExp cexp ->
+        let
+          ( id , fresh1 ) = genId fresh0 ty
+        in
+          fun id fresh1
+            |> Result.map (\(exp_, ty_, fresh2 ) ->
+              ( Let id ty cexp exp_, ty_, fresh2 ))
+
+      Let id ty_ cexp exp_ ->
+        insertLetIfNotVar exp_ ty fun fresh0
+          |> Result.map (\( exp__, _, fresh1 ) -> ( Let id ty_ cexp exp__, ty, fresh1 ))
+
+      Letrec id ty_ args e1 e2 ->
+        insertLetIfNotVar e2 ty fun fresh0
+          |> Result.map (\( exp_, _, fresh1 ) -> ( Letrec id ty_ args e1 exp_, ty, fresh1))
+
 
 insertLet : Exp -> Ty -> (Id -> State) -> State
 insertLet tm ty fun =
@@ -217,18 +251,18 @@ toString term =
       in
         case exp of
           CompExp cexp ->
-            helpc ind cexp
+            indent ++ helpc ind cexp ++ "\n"
 
           Let id ty t1 t2 ->
-            indent ++ "let " ++ vd2s (id, ty) ++ " =\n" ++
+            indent ++ "let " ++ vd2s (id, ty) ++ " = " ++
             helpc (ind+1) t1 ++
-            indent ++ "in\n" ++
-            help (ind+1) t2
+            " in\n" ++
+            help (ind) t2
 
           Letrec id ty args t1 t2 ->
             indent ++ "letrec " ++ vd2s (id, ty) ++ "(" ++ (args |> List.map vd2s |> String.join ", ") ++ ") =\n" ++
             help (ind+1) t1 ++
-            indent ++ "in\n" ++
+            indent ++ " in\n" ++
             help (ind+1) t2
 
     helpc ind cexp =
@@ -237,9 +271,10 @@ toString term =
       in
         case cexp of
           Int int ->
-            indent ++ (int |> String.fromInt) ++ "\n"
+            int |> String.fromInt
 
           If id t1 t2 ->
+            "\n" ++
             indent ++ "if " ++ id ++ "\n" ++
             indent ++ "then\n" ++
             help (ind+1) t1 ++
@@ -247,15 +282,15 @@ toString term =
             help (ind+1) t2
 
           Var id ->
-            indent ++ id ++ "\n"
+            id
 
           App fun args ->
-            indent ++ fun ++ "(" ++ String.join ", " args ++ ")\n"
+            fun ++ "(" ++ String.join ", " args ++ ")"
 
           KnlApp fun args ->
-            indent ++ "@" ++ fun ++ "@(" ++ String.join ", " args ++ ")\n"
+            "@" ++ fun ++ "@(" ++ String.join ", " args ++ ")"
 
           ExtApp fun args ->
-            indent ++ "$" ++ fun ++ "$(" ++ String.join ", " args ++ ")\n"
+            "$" ++ fun ++ "$(" ++ String.join ", " args ++ ")"
   in
     help 0 term
